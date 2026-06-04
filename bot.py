@@ -340,7 +340,7 @@ async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = f"🔍 *{barcode}*\n\n"
     for row_name, position in results:
-        text += f"• *{row_name}* → position {position}\n"
+        text += f"• *{row_name}* → коробка {position}\n"
 
     file_id = get_photo_file_id(barcode)
 
