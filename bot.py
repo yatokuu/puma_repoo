@@ -4,6 +4,7 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboard
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters, ConversationHandler,
+    JobQueue,
 )
 
 TOKEN    = os.environ["BOT_TOKEN"]
@@ -211,9 +212,18 @@ async def search_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Please send /start to register first.")
         return ConversationHandler.END
     context.user_data["searching"] = True
+    # Cancel existing job then schedule 2h auto-stop
+    for job in context.job_queue.get_jobs_by_name(f"autostop_{tg_id}"):
+        job.schedule_removal()
+    context.job_queue.run_once(
+        auto_stop_search,
+        when=7200,
+        data={"tg_id": tg_id},
+        name=f"autostop_{tg_id}"
+    )
     await update.message.reply_text(
         "🔍 *Search mode ON*\n\nType any barcode or partial code.\n"
-        "Tap 🛑 Stop search when you're done.",
+        "Tap 🛑 Stop search when you're done. _Auto-stops in 2h._",
         parse_mode="Markdown",
         reply_markup=get_menu(tg_id)
     )
@@ -269,6 +279,9 @@ async def search_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def search_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     context.user_data.pop("searching", None)
+    # Cancel the auto-stop job since user stopped manually
+    for job in context.job_queue.get_jobs_by_name(f"autostop_{tg_id}"):
+        job.schedule_removal()
     await update.message.reply_text(
         "🛑 Search mode OFF.",
         reply_markup=get_menu(tg_id)
@@ -616,6 +629,31 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text("⚠️ Something went wrong. Try again.")
         except Exception:
             pass
+
+# ==========================
+# 2-HOUR AUTO-STOP (per user)
+# ==========================
+
+async def auto_stop_search(context: ContextTypes.DEFAULT_TYPE):
+    """Called 2 hours after a user starts searching. Ends their session."""
+    tg_id = context.job.data["tg_id"]
+
+    # Find and end the search conversation for this user
+    for handler in context.application.handlers[0]:
+        if isinstance(handler, ConversationHandler) and getattr(handler, "name", None) == "search":
+            key = (tg_id, tg_id)  # per_chat=False key format
+            if handler._conversations.get(key) == S_SEARCH:
+                handler._conversations[key] = ConversationHandler.END
+                try:
+                    await context.bot.send_message(
+                        tg_id,
+                        "🛑 *Search mode auto-stopped* after 2 hours.\n"
+                        "Tap 🔍 Find item to search again.",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+            break
 
 # ==========================
 # APP SETUP
