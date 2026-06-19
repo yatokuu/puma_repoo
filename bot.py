@@ -4,7 +4,6 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboard
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters, ConversationHandler,
-    JobQueue,
 )
 
 TOKEN    = os.environ["BOT_TOKEN"]
