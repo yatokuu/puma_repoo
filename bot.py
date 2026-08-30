@@ -696,9 +696,8 @@ async def ask_box(msg, context, row_name):
     ).fetchall()
 
     if boxes:
-        buttons = [[InlineKeyboardButton(
-            f"Box {pos}", callback_data=f"addbox:{pos}"
-        ) for (pos,) in boxes]]
+        # One button per row to avoid Telegram truncating labels
+        buttons = [[InlineKeyboardButton(f"📦 {pos}", callback_data=f"addbox:{pos}")] for (pos,) in boxes]
         buttons.append([InlineKeyboardButton("✏️ New box number", callback_data="addbox:__new__")])
         await msg.reply_text(
             f"➕ *Step 3 of 3 — Box*\n\nRow: *{row_name}*\n\nPick an existing box or enter a new number:",
