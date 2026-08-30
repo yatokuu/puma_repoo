@@ -56,8 +56,11 @@ conn.commit()
 # STATES
 # ==========================
 
-S_JOIN   = 0   # waiting for join code
-S_SEARCH = 1   # continuous search mode
+S_JOIN      = 0   # waiting for join code
+S_SEARCH    = 1   # continuous search mode
+S_ADD_BARCODE = 2   # add flow: entering barcode(s)
+S_ADD_ROW     = 3   # add flow: picked/typed row
+S_ADD_BOX     = 4   # add flow: entering box number
 
 # ==========================
 # ROLE HELPERS
@@ -87,7 +90,10 @@ def register(tg_id, name, role):
 
 def worker_menu():
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("🔍 Find item"), KeyboardButton("🛑 Stop search")]],
+        [
+            [KeyboardButton("🔍 Find item"), KeyboardButton("🛑 Stop search")],
+            [KeyboardButton("➕ Add item")],
+        ],
         resize_keyboard=True,
         is_persistent=True
     )
@@ -96,7 +102,7 @@ def manager_menu():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("🔍 Find item"), KeyboardButton("🛑 Stop search")],
-            [KeyboardButton("📋 Search log")],
+            [KeyboardButton("➕ Add item"),  KeyboardButton("📋 Search log")],
         ],
         resize_keyboard=True,
         is_persistent=True
@@ -615,6 +621,158 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_menu(tg_id)
     )
 
+
+# ==========================
+# ADD ITEM FLOW (button-driven)
+# ==========================
+
+async def add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    if not is_registered(tg_id):
+        await update.message.reply_text("❌ Please send /start to register first.")
+        return ConversationHandler.END
+    context.user_data.pop("add_barcodes", None)
+    context.user_data.pop("add_row",      None)
+    await update.message.reply_text(
+        "➕ *Step 1 of 3 — Barcode(s)*\n\n"
+        "Type the barcode. If multiple items share the same box, separate with commas:\n"
+        "`111-22, 333-44`",
+        parse_mode="Markdown"
+    )
+    return S_ADD_BARCODE
+
+async def add_got_barcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id    = update.effective_user.id
+    raw      = update.message.text.strip()
+    barcodes = [b.strip() for b in raw.split(",") if b.strip()]
+    if not barcodes:
+        await update.message.reply_text("❌ Please enter at least one barcode.")
+        return S_ADD_BARCODE
+    context.user_data["add_barcodes"] = barcodes
+
+    # Show existing rows as inline buttons + New row option
+    rows = cur.execute(
+        "SELECT DISTINCT row_name FROM inventory ORDER BY row_name"
+    ).fetchall()
+
+    buttons = []
+    for (row_name,) in rows:
+        buttons.append([InlineKeyboardButton(row_name, callback_data=f"addrow:{row_name}")])
+    buttons.append([InlineKeyboardButton("✏️ New row", callback_data="addrow:__new__")])
+
+    label = ", ".join(barcodes) if len(barcodes) <= 3 else f"{len(barcodes)} barcodes"
+    await update.message.reply_text(
+        f"➕ *Step 2 of 3 — Row*\n\nBarcode(s): `{label}`\n\nPick an existing row or create a new one:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    return S_ADD_ROW
+
+async def add_row_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    choice = q.data.split(":", 1)[1]
+
+    if choice == "__new__":
+        await q.message.reply_text(
+            "✏️ Type the new row name:\n_(e.g. Новая_коллекция_3ряд)_",
+            parse_mode="Markdown"
+        )
+        return S_ADD_ROW
+
+    context.user_data["add_row"] = choice
+    return await ask_box(q.message, context, choice)
+
+async def add_row_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    row_name = update.message.text.strip()
+    context.user_data["add_row"] = row_name
+    return await ask_box(update.message, context, row_name)
+
+async def ask_box(msg, context, row_name):
+    # Show existing boxes in this row as buttons
+    boxes = cur.execute(
+        "SELECT DISTINCT position FROM inventory WHERE row_name=? ORDER BY position",
+        (row_name,)
+    ).fetchall()
+
+    if boxes:
+        buttons = [[InlineKeyboardButton(
+            f"Box {pos}", callback_data=f"addbox:{pos}"
+        ) for (pos,) in boxes]]
+        buttons.append([InlineKeyboardButton("✏️ New box number", callback_data="addbox:__new__")])
+        await msg.reply_text(
+            f"➕ *Step 3 of 3 — Box*\n\nRow: *{row_name}*\n\nPick an existing box or enter a new number:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    else:
+        await msg.reply_text(
+            f"➕ *Step 3 of 3 — Box*\n\nRow: *{row_name}*\n\nPick an existing box or enter a new number:",
+            parse_mode="Markdown"
+        )
+    return S_ADD_BOX
+
+async def add_box_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    choice = q.data.split(":", 1)[1]
+
+    if choice == "__new__":
+        await q.message.reply_text("✏️ Type the new box number:")
+        return S_ADD_BOX
+
+    return await do_save(q.message, context, int(choice), q.from_user.id)
+
+async def add_box_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        box = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ Box number must be a number. Try again:")
+        return S_ADD_BOX
+    return await do_save(update.message, context, box, update.effective_user.id)
+
+async def do_save(msg, context, box, tg_id):
+    barcodes = context.user_data.get("add_barcodes", [])
+    row_name = context.user_data.get("add_row", "")
+    role     = get_role(tg_id)
+
+    if not barcodes or not row_name:
+        await msg.reply_text("❌ Something went wrong. Please tap ➕ Add item again.",
+                             reply_markup=get_menu(tg_id))
+        return ConversationHandler.END
+
+    saved = []
+    dupes = []
+    for barcode in barcodes:
+        try:
+            cur.execute(
+                "INSERT INTO inventory (barcode, row_name, position) VALUES (?,?,?)",
+                (barcode, row_name, box)
+            )
+            saved.append(barcode)
+        except sqlite3.IntegrityError:
+            dupes.append(barcode)
+    conn.commit()
+
+    lines = []
+    if saved:
+        lines.append(
+            f"✅ Saved {len(saved)} barcode(s):\n" +
+            "\n".join(f"  • `{b}` → *{row_name}*, box {box}" for b in saved)
+        )
+    if dupes:
+        lines.append(
+            f"⚠️ Already existed (skipped):\n" +
+            "\n".join(f"  - `{b}`" for b in dupes)
+        )
+
+    await msg.reply_text("\n\n".join(lines), parse_mode="Markdown",
+                         reply_markup=get_menu(tg_id))
+
+    context.user_data.pop("add_barcodes", None)
+    context.user_data.pop("add_row",      None)
+    return ConversationHandler.END
+
 # ==========================
 # ERROR HANDLER
 # ==========================
@@ -673,6 +831,33 @@ app.add_handler(ConversationHandler(
     name="register",
 ))
 
+# Add item conversation
+app.add_handler(ConversationHandler(
+    entry_points=[
+        MessageHandler(filters.Regex(r"^➕ Add item$"), add_entry),
+    ],
+    states={
+        S_ADD_BARCODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_got_barcodes)],
+        S_ADD_ROW:     [
+            CallbackQueryHandler(add_row_picked, pattern=r"^addrow:"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, add_row_typed),
+        ],
+        S_ADD_BOX:     [
+            CallbackQueryHandler(add_box_picked, pattern=r"^addbox:"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, add_box_typed),
+        ],
+    },
+    fallbacks=[
+        CommandHandler("cancel", lambda u, c: (u.message.reply_text("↩️ Cancelled.", reply_markup=get_menu(u.effective_user.id)), ConversationHandler.END)[1]),
+        MessageHandler(filters.Regex(r"^(🔍 Find item|🛑 Stop search|📋 Search log)$"),
+                       lambda u, c: (u.message.reply_text("↩️ Cancelled.", reply_markup=get_menu(u.effective_user.id)), ConversationHandler.END)[1]),
+    ],
+    per_user=True,
+    per_chat=False,
+    allow_reentry=True,
+    name="add_item",
+))
+
 # Continuous search conversation
 app.add_handler(ConversationHandler(
     entry_points=[
@@ -695,7 +880,9 @@ app.add_handler(ConversationHandler(
 ))
 
 # Inline button taps
-app.add_handler(CallbackQueryHandler(cb_show, pattern=r"^show:"))
+app.add_handler(CallbackQueryHandler(cb_show,        pattern=r"^show:"))
+app.add_handler(CallbackQueryHandler(add_row_picked, pattern=r"^addrow:"))
+app.add_handler(CallbackQueryHandler(add_box_picked, pattern=r"^addbox:"))
 
 # Manager search log button
 app.add_handler(MessageHandler(filters.Regex(r"^📋 Search log$"), search_log))
