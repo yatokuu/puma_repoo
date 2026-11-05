@@ -906,5 +906,8 @@ app.add_handler(MessageHandler(filters.PHOTO, receive_photo))
 
 app.add_error_handler(error_handler)
 
-print("Puma Depot Bot running...")
-app.run_polling()
+print("Puma Depot Bot running...", flush=True)
+try:
+    app.run_polling()
+finally:
+    print("Bot stopped (run_polling returned or crashed)", flush=True)

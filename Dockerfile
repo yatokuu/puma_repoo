@@ -9,5 +9,6 @@ COPY bot.py .
 
 # DB and photos will live in /data (mounted as a Railway volume)
 ENV DB_PATH=/data/inventory.db
+ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "bot.py"]
